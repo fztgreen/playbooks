@@ -3,30 +3,38 @@
 ## Overview
 This playbook defines the process for implementing a `POST /Health/Test` endpoint that allows an API to validate its own integrity across Dev, UAT, and Production environments.
 
+## Phase 0: Safety & Governance
+Before any discovery or implementation, the system must establish mandatory guardrails.
+
+### 0.1 Access Control & Intent
+- **Requirement:** The `POST /Test` endpoint MUST be protected by Bearer Token (JWT) or mTLS.
+- **Requirement:** Requests MUST include a custom header `X-SelfTest-Intent: run` to prevent accidental triggers.
+- **Requirement:** Implement an explicit `mode` query parameter: `?mode=ReadOnly|SafeWrite|Full`.
+- **Default Policy:** `Full` mode MUST be disabled in Production environments via Feature Flag.
+
+### 0.2 Tenant & Data Isolation
+- **Requirement:** Tests MUST use a dedicated "Test Tenant" or "Sandbox User" context.
+- **Requirement:** Any data created during `SafeWrite` or `Full` modes MUST be tagged with a `Test-Correlation-ID` and include an automated cleanup step (or TTL).
+
 ## Phase 1: Discovery & Scoping
 The executor must first map the application landscape to understand the testing surface area.
 
 ### 1.1 Dependency & NuGet Mapping
-- **Action:** Analyze `Program.cs`, `Startup.cs`, and `*.csproj` files.
-- **Scope:** Databases, Brokers, Cache, and **Critical NuGet Packages** (e.g., EF Core, Serilog, OpenTelemetry).
-- **Requirement:** Identify packages that underwent major version jumps. The executor must determine a "Smoke Test" for each.
+... (existing content) ...
 
 ### 1.2 Configuration & Secret Mapping
-- **Action:** Perform a recursive scan of the codebase for configuration consumption.
-- **Patterns to Identify:**
-    - `IOptions<T>`, `IOptionsSnapshot<T>`, `IOptionsMonitor<T>` (Options Pattern).
-    - `Configuration["Key"]` or `_configuration.GetValue<T>("Key")` (Direct Access).
-- **Goal:** Build a master list of all required keys that must be present in the ConfigMap or Environment Variables.
+... (existing content) ...
 
-### 1.2 Endpoint & Parity Discovery
+### 1.3 Endpoint & Parity Discovery
 - **Action:** Inspect Controllers and Minimal API mappings.
 - **Parity Audit:** Attempt to locate the legacy system's route manifest (e.g., legacy `swagger.json` or documentation).
 - **Requirement:** Create a **Gaps Report** in the checklist identifying any legacy endpoints not found in the new codebase.
 - **Requirement:** **FILTER OUT** the `HealthController` and the `/Test` route.
 
-### 1.3 External Data & Side-Effect Identification
-...
-### 1.4 Critical Workflow Identification
+### 1.4 External Data & Side-Effect Identification
+... (existing content) ...
+
+### 1.5 Critical Workflow Identification
 - **Action:** Group endpoints into "Business Journeys" and identify **Critical Workflows**.
 - **Definition of Critical:**
     - **Revenue/Core Logic:** (e.g., Checkouts, Payments, Account Creation).
@@ -84,35 +92,49 @@ Before implementation, the executor must ensure the user understands the scope.
 - **Status Code:** Returns `200 OK` only if `status` is `PASS`; otherwise returns `503 Service Unavailable`.
 
 ### 3.2 DI Container Validation
-- **Logic:** Iterate through the `IServiceCollection` registered in the `IServiceProvider`.
-- **Action:** Attempt to resolve every registered service (or at least all Controllers/Services).
-- **Goal:** Catch "Unable to resolve service for type..." errors that usually only appear at runtime.
-
-### 3.3 Connection & Behavioral Health
-- **Logic:** Execute a "ping" AND a "basic operation" for all mapped dependencies.
+- **Logic:** Validate the service provider without expensive or unsafe runtime resolutions.
 - **Action:** 
-    - **Database:** Execute a simple query via the ORM (e.g., EF Core).
-    - **Observability (Serilog):** Emit a "Health Test" log and verify the `ILogger` is resolved correctly from DI.
-    - **Observability (Otel):** Start a test `Activity` or `Span` via the Otel/Grafana SDK to ensure the telemetry pipeline is initialized.
-    - **Mapping:** Trigger a sample Map (e.g., AutoMapper) to verify profiles are still valid in the new runtime.
+    - Enable `ValidateScopes` and `ValidateOnBuild` in the `Host` configuration.
+    - **Targeted Resolution:** Only resolve specific categories within a dedicated `IServiceScope`:
+        - All `ControllerBase` types.
+        - All `IHostedService` types.
+        - A developer-defined "Critical Services" allowlist.
+- **Goal:** Catch "Unable to resolve service" errors at startup without side-effect risks.
 
-### 3.4 In-Process Endpoint & Workflow Validation
-- **Logic:** Resolve Controllers and invoke actions directly.
-- **Testing Priorities:**
-    - **100% Happy Path:** Every endpoint must have a successful "basic" execution.
-    - **Critical Workflow Sequencing:** Pass state between steps for "Crown Jewel" journeys.
-    - **Performance Budgeting:** Measure and report execution time for each Critical Workflow.
-    - **Graceful Failure Check:** Verify the Global Exception Handler.
-- **Execution Strategy:**
-    - **Parallel Execution:** Utilize `Task.WhenAll` or a `SemaphoreSlim` to execute test scenarios in parallel.
-    - **Safety Timeouts:** Implement a mandatory timeout (e.g., 30s) per scenario or for the entire suite.
-    - **Timeout Handling:** If a test exceeds the timeout, the system must **cancel the task**, capture the specific scenario that hung, and notify the user in the report.
-- **Output (Reporting Timeouts):**
-    - The JSON response must explicitly list any **Timed Out** tests.
-    - Include the reason (e.g., "Dependency Latency" or "Deadlock suspected") based on the last captured trace before the timeout.
+### 3.3 Connection & Behavioral Health (L0)
+- **Logic:** Execute "Sanity" checks for dependencies and internal invariants.
+- **Action:** 
+    - **Database:** Execute a simple query via the ORM.
+    - **Observability (Serilog/Otel):** 
+        - Verify `ActivitySource` and `ILogger` are resolved.
+        - Check for internal "Self-Diagnostics" errors in the Otel exporter configuration.
+    - **Mapping:** Trigger a sample Map (e.g., AutoMapper).
 
-## Phase 4: External Data Configuration
-If the executor finds that endpoints require specific data, they must create the following template:
+### 3.4 HTTP Pipeline Validation (L1 & L2)
+- **Logic:** Execute tests through the full ASP.NET Core middleware pipeline (routing, auth filters, model binding, serialization).
+- **Execution Strategy:** 
+    - Use `WebApplicationFactory<T>` or `TestServer` for **in-process HTTP calls**.
+    - **L1 (Read-Only):** Perform `GET` requests for all discovered endpoints using `ReadOnly` mode.
+    - **L2 (Critical Workflows):** Execute "Business Journeys" (e.g., Create -> Get -> Update) using `SafeWrite` mode and a test tenant.
+- **Performance Budgeting:** Measure and report execution time for each Critical Workflow.
+- **Output (Reporting):** 
+    - The JSON response MUST explicitly list any **Timed Out** or **Blocked** tests.
+- **Scoring Rules for overallCoverage:**
+    - **Pass:** All L0 checks pass + 100% of L2 critical workflows pass + 100% of L1 happy paths pass.
+    - **Partial:** All L0 checks pass + 100% of L2 critical workflows pass + <100% of L1 happy paths pass.
+    - **Fail:** Any L0 check fails OR any L2 critical workflow fails.
+
+## Phase 4: Plugin Model for Maintainability
+The self-test suite MUST avoid bespoke, unmanageable code.
+
+### 4.1 Interface-Based Tests
+- **IDependencyCheck:** Implement for each dependency (e.g., `SqlDependencyCheck`, `RedisDependencyCheck`).
+- **IEndpointScenario:** For individual L1 happy path tests.
+- **IWorkflowScenario:** For grouped L2 business journeys.
+- **Goal:** Allow the test runner to automatically discover and execute tests using Reflection.
+
+### 4.2 External Data Configuration
+If the executor finds that endpoints require specific data, they must create the following template for the user to populate:
 
 **test-data.template.json**
 ```json
@@ -120,39 +142,13 @@ If the executor finds that endpoints require specific data, they must create the
   "Endpoints": {
     "/api/v1/Users/{id}": {
       "id": "REPLACE_WITH_VALID_GUID"
-    },
-    "/api/v1/Orders/Process": {
-      "body": { "orderId": "REPLACE_WITH_DATA" }
     }
   }
 }
 ```
 
-## Phase 5: Final Validation & Observability
-
-### 5.1 Snapshot Regression
-- **Action:** If available, compare the JSON output of the `POST /Test` against a "Golden Snapshot" from the legacy system.
-- **Goal:** Detect subtle serialization shifts (e.g., `DateTime` ISO formats, `null` vs. `empty` arrays).
-
-### 5.2 Configuration & Secret Audit
-- **Action:** Cross-reference the master list of keys from Phase 1.2 against the runtime environment.
-- **Verification:**
-    - **ConfigMaps:** Ensure non-sensitive keys exist in the injected configuration providers.
-    - **Secrets:** Verify that sensitive keys (e.g., API keys, Connection Strings) are present as Environment Variables.
-- **Goal:** Prevent "Missing Configuration" errors that often occur during migration when names change (e.g., `ConnectionStrings:Db` vs `DB_CONNECTION`).
-
-### 5.3 Observability Verification
-- **Action:** The `/Test` endpoint must emit a specific "Self-Test-Success" log and trace.
-- **Goal:** Confirm that the migration didn't break the logging and telemetry pipeline.
-
-### 5.4 Executive Sign-Off Report
-- **Action:** The executor must generate a final `EXECUTIVE_SUMMARY.md` based on the codebase validation findings.
-- **Mandatory Content:**
-    - **Migration Readiness:** [READY/NOT READY]
-    - **Feature Parity:** [X] of [Y] legacy features validated.
-    - **Critical Workflows:** Results of the identified business journeys.
-    - **Residual Risks:** List any endpoints or dependencies that were skipped and why.
-    - **Observability Proof:** Verification that Serilog and Otel traces were successfully emitted during the test.
+## Phase 5: Final Validation & Reporting
+... (existing Phase 5 content) ...
 
 ---
-**Note to Executor:** Success is defined as a codebase where the `POST /Test` endpoint reliably validates the happy path of all endpoints and critical workflows within the application process.
+**Note to Executor:** Success is defined as a codebase where the `POST /Test` endpoint reliably validates the happy path of all endpoints and critical workflows **through the full HTTP pipeline** without introducing side-effect risks or production instability.
