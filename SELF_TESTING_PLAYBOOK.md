@@ -89,8 +89,10 @@ Output MUST strictly follow the `<Company_Standard_Health_Schema>`:
 - **L2 (Workflows):** Sequence HTTP calls (POST -> GET) passing state between them.
 - **Snapshot Validation:** Canonicalize (sort keys, normalize dates/GUIDs) and diff. DO NOT normalize away `null` vs `missing` or precision changes.
 
-## Phase 4: Plugin Model & Maintainability
-- **Interfaces:** Implement `IDependencyCheck`, `IEndpointScenario`, and `IWorkflowScenario`.
+## Phase 4: Maintainability & Clean Code
+- **Naming Standards:** Use simple, clear, and descriptive names for all methods. Avoid cryptic abbreviations.
+- **Self-Documenting Code:** Follow Clean Code principles; prioritize well-named functions and expressive logic over inline comments to explain "what" or "how".
+- **Interfaces:** Implement `IDependencyCheck`, `IEndpointScenario`, and `IWorkflowScenario` to ensure modularity.
 - **Parallelism:** Execute scenarios in parallel with a 30s `CancellationToken` and failure taxonomy reporting.
 
 ## Phase 5: Final Validation & Reporting
@@ -98,6 +100,7 @@ Output MUST strictly follow the `<Company_Standard_Health_Schema>`:
 2. **Configuration Audit:** Verify 100% of discovered keys have values in the runtime environment.
 3. **EXECUTIVE_SUMMARY.md:** Final "Go/No-Go" report.
 4. **Readiness Rule:** `migrationReady=true` requires 100% L0/L2 PASS and L1 Coverage ≥ 90% with ZERO `5xx` or `ContractMismatch` failures.
+5. **Build Integrity:** Validate that the .NET API and all associated test projects build successfully (`dotnet build`) without errors before final completion.
 
 ---
 **Note to Executor:** Direct controller invocation is FORBIDDEN for L1/L2. All endpoint testing MUST exercise the full middleware pipeline.
